@@ -5055,9 +5055,6 @@ function emptyState() {
     outputVersions: {},    // { مفتاح الورقة أو 'G:المجموعة': { kind, group, id, label, scope, list:[{ n, at, sig, count, lastAt, via, file }], retired } }
     changeLog: [],         // سجل التغييرات التشغيلي: [{ id, at, type, text, slots, rooms, courses, trainees, sups, outputs, stale, details }]
     slotSnapshots: {},     // { slotKey: [لقطة معتمدة] }
-    // V5.5 — مخطط المبنى في المشهد (مستقل عن ترتيب ملء القاعات، ولا يدخل في أي مخرج):
-    // null = الترتيب التلقائي | { A: [معرفات الصف الخلفي], B: [معرفات الصف الأمامي ومعها 'lobby'], others: [{ id, name, size: 's'|'m'|'l' }] }
-    buildingLayout: null,
 
     schedule: {},          // { courseCode: slotKey } — slotKey = dayId + '_' + periodId
     bestSchedule: null, conflicts: null,
@@ -7814,118 +7811,9 @@ function availabilityGrid() {
         h('tfoot', null, h('tr', null, h('th', null, 'الطاقة'), ...slots.map(s => h('th', { class: 'c num' }, slotCapacity(s.key)))))))));
 }
 
-/* ---------- V5.5: مخطط المبنى في المشهد ----------
-   مستقل عن ترتيب ملء القاعات (▲▼ في جدول القاعات): يحدد صف كل قاعة وموضعها في المبنى، ويضيف غرفًا أخرى تُرسم فارغة باسمها.
-   S.buildingLayout = null (الترتيب التلقائي) | { A: [معرفات الصف الخلفي], B: [معرفات الصف الأمامي ومعها 'lobby'], others: [{ id, name, size }] }
-   لا يدخل في التوزيع ولا في السعة ولا في أي مخرج. */
-const BL_OTHER_MAX = 20, BL_NAME_MAX = 40;
-const BL_ROW_NAMES = { A: 'الصف الخلفي', B: 'الصف الأمامي (فيه المدخل)' };
-function blClosestSize(w) { return Object.keys(OTHER_ROOM_SIZES).reduce((a, k) => Math.abs(OTHER_ROOM_SIZES[k].w - w) < Math.abs(OTHER_ROOM_SIZES[a].w - w) ? k : a, 'm'); }
-function blNewId() { let id; do { id = 'o' + Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36); } while (S.rooms.some(r => r.id === id) || ((S.buildingLayout && S.buildingLayout.others) || []).some(o => o.id === id)); return id; }
-/** الصفّان كما يظهران في المشهد الآن. في الترتيب التلقائي يظهر مكتب «لجنة الاختبارات» التلقائي (إن وُجد) كغرفة أخرى في آخر الصف الخلفي. */
-function blRowsNow() {
-  const cur = Scene3D.buildingRows();
-  if (!cur.custom && cur.office > 3) cur.A.push({ type: 'other', id: 'auto-office', name: 'لجنة الاختبارات', size: blClosestSize(cur.office), auto: true });
-  return cur;
-}
-/** ينفّذ تعديلًا على المخطط. أول تعديل يحوّل الترتيب التلقائي إلى مخطط مستقل مطابق لما يظهر الآن ثم يطبّق التعديل. */
-function editBuildingLayout(label, fn) {
-  const cur = blRowsNow(), others = [];
-  const ids = row => row.map(x => {
-    if (x.type !== 'other') return x.id;
-    const id = x.auto ? blNewId() : x.id; others.push({ id, name: x.name, size: x.size }); return id;
-  });
-  const next = { A: ids(cur.A), B: ids(cur.B), others };
-  if (fn(next) === false) return;
-  // تعديل لا يغيّر شيئًا (مثل حدث change متأخر من حقل أُعيد رسمه) لا يُسجَّل خطوة تراجع
-  if (S.buildingLayout && JSON.stringify(next) === JSON.stringify(S.buildingLayout)) return;
-  markChange('مخطط المبنى: ' + label);
-  S.buildingLayout = next; bump('settings'); refresh({ keepScroll: true });
-}
-function buildingLayoutCard() {
-  const cur = blRowsNow();
-  const nOthers = cur.A.concat(cur.B).filter(x => x.type === 'other').length;
-  const title = x => x.type === 'room' ? 'القاعة ' + x.num : x.type === 'lobby' ? 'المدخل (البهو)' : x.name;
-  const rowTable = (rowKey) => {
-    const list = cur[rowKey], other = rowKey === 'A' ? 'B' : 'A';
-    const rows = list.map((x, i) => {
-      const mv = d => editBuildingLayout(`نقل «${title(x)}» ${d < 0 ? 'لأعلى' : 'لأسفل'} في ${BL_ROW_NAMES[rowKey]}`, L => {
-        const a = L[rowKey], j = i + d; if (j < 0 || j >= a.length) return false; [a[i], a[j]] = [a[j], a[i]]; });
-      const order = h('span', { class: 'order-btns' },
-        h('button', { class: 'btn sm', type: 'button', title: 'لأعلى (نحو أول الممر)', disabled: i === 0, 'data-bl-up': x.id, onclick: () => mv(-1) }, '▲'),
-        h('button', { class: 'btn sm', type: 'button', title: 'لأسفل (نحو آخر الممر)', disabled: i === list.length - 1, 'data-bl-down': x.id, onclick: () => mv(1) }, '▼'));
-      let nameCell, sizeCell;
-      if (x.type === 'other') {
-        const name = h('input', { type: 'text', value: x.name, maxlength: BL_NAME_MAX, style: { width: '170px' }, 'data-bl-name': x.id, 'aria-label': 'اسم الغرفة' });
-        name.addEventListener('change', () => {
-          const v = normText(name.value).slice(0, BL_NAME_MAX);
-          if (!v) { toast('اسم الغرفة لا يكون فارغًا', 'bad'); name.value = x.name; return; }
-          if (v === x.name) { name.value = v; return; }
-          editBuildingLayout(`تغيير اسم «${x.name}» إلى «${v}»`, L => {
-            const o = L.others.find(o => o.id === x.id || (x.auto && o.name === x.name)); if (!o || o.name === v) return false; o.name = v; });
-        });
-        const size = h('select', { 'data-bl-size': x.id, 'aria-label': 'حجم الغرفة', style: { width: 'auto' } },
-          ...Object.entries(OTHER_ROOM_SIZES).map(([k, z]) => h('option', { value: k, selected: k === x.size }, z.label)));
-        size.addEventListener('change', () => {
-          const v = size.value; if (!OTHER_ROOM_SIZES[v] || v === x.size) return;
-          editBuildingLayout(`حجم «${x.name}»: ${OTHER_ROOM_SIZES[v].label}`, L => {
-            const o = L.others.find(o => o.id === x.id || (x.auto && o.name === x.name)); if (!o || o.size === v) return false; o.size = v; });
-        });
-        nameCell = h('td', null, name, x.auto ? h('span', { class: 'muted small' }, ' (أضافه الترتيب التلقائي)') : null);
-        sizeCell = h('td', null, size);
-      } else {
-        nameCell = h('td', null, h('b', null, title(x)), x.type === 'room' ? h('span', { class: 'muted small' }, ` — ${x.cols} أعمدة × ${x.seats} مقاعد`) : h('span', { class: 'muted small' }, ' — يبقى في الصف الأمامي'));
-        sizeCell = h('td', { class: 'muted' }, x.type === 'room' ? 'حسب الأعمدة' : 'تلقائي');
-      }
-      const acts = h('td', null,
-        x.type !== 'lobby' ? h('button', { class: 'btn sm', type: 'button', 'data-bl-swap': x.id, title: 'نقل إلى ' + BL_ROW_NAMES[other],
-          onclick: () => editBuildingLayout(`نقل «${title(x)}» إلى ${BL_ROW_NAMES[other]}`, L => {
-            const id = L[rowKey][i]; L[rowKey].splice(i, 1); L[other].push(id); }) }, rowKey === 'A' ? 'إلى الأمامي' : 'إلى الخلفي') : null,
-        x.type === 'other' ? h('button', { class: 'btn sm', type: 'button', 'data-bl-del': x.id, style: { marginInlineStart: '4px' },
-          onclick: () => editBuildingLayout(`حذف «${x.name}»`, L => {
-            const id = L[rowKey][i]; L[rowKey].splice(i, 1); L.others = L.others.filter(o => o.id !== id); }) }, 'حذف') : null);
-      return h('tr', { 'data-bl-item': x.id }, h('td', { class: 'c num' }, i + 1, ' ', order), nameCell, sizeCell, acts);
-    });
-    return h('div', { 'data-bl-row': rowKey },
-      h('h3', null, BL_ROW_NAMES[rowKey], ' ', h('span', { class: 'badge info' }, list.length)),
-      h('div', { class: 'table-wrap' }, h('table', { class: 't' },
-        h('thead', null, h('tr', null, ...['الموضع', 'القاعة أو الغرفة', 'الحجم', ''].map(t => h('th', null, t)))),
-        h('tbody', null, ...rows))));
-  };
-  // إضافة غرفة أخرى
-  const addName = h('input', { type: 'text', maxlength: BL_NAME_MAX, placeholder: 'اسم الغرفة، مثل: مكتب المراقبين', style: { width: '230px' }, 'data-testid': 'bl-add-name' });
-  const addSize = h('select', { 'data-testid': 'bl-add-size', style: { width: 'auto' }, 'aria-label': 'حجم الغرفة' }, ...Object.entries(OTHER_ROOM_SIZES).map(([k, z]) => h('option', { value: k, selected: k === 'm' }, z.label)));
-  const addRow = h('select', { 'data-testid': 'bl-add-row', style: { width: 'auto' }, 'aria-label': 'الصف' }, h('option', { value: 'A' }, BL_ROW_NAMES.A), h('option', { value: 'B' }, BL_ROW_NAMES.B));
-  const addBtn = h('button', { class: 'btn sm primary', type: 'button', 'data-testid': 'bl-add', onclick: () => {
-    const v = normText(addName.value).slice(0, BL_NAME_MAX);
-    if (!v) { toast('اكتب اسم الغرفة أولًا', 'bad'); addName.focus(); return; }
-    if (nOthers >= BL_OTHER_MAX) { toast(`الحد ${BL_OTHER_MAX} غرفة أخرى`, 'bad'); return; }
-    const size = OTHER_ROOM_SIZES[addSize.value] ? addSize.value : 'm', row = addRow.value === 'B' ? 'B' : 'A';
-    editBuildingLayout(`إضافة «${v}» (${OTHER_ROOM_SIZES[size].label}) في ${BL_ROW_NAMES[row]}`, L => { const id = blNewId(); L.others.push({ id, name: v, size }); L[row].push(id); });
-  } }, 'إضافة غرفة');
-  const reset = cur.custom ? h('button', { class: 'btn sm', type: 'button', 'data-testid': 'bl-reset', onclick: guard(async () => {
-    const n = (S.buildingLayout.others || []).length;
-    if (!await confirmDialog('استعادة الترتيب التلقائي', ['يعود المبنى في المشهد إلى الترتيب التلقائي: نصف القاعات في الصف الخلفي والباقي في الأمامي بترتيب التعبئة.',
-      n ? `ستُحذف الغرف الأخرى (${n}). يمكن التراجع بزر «تراجع».` : 'يمكن التراجع بزر «تراجع».'], 'استعادة', 'danger')) return;
-    markChange('مخطط المبنى: استعادة الترتيب التلقائي'); S.buildingLayout = null; bump('settings'); refresh({ keepScroll: true });
-  }) }, 'استعادة الترتيب التلقائي') : null;
-  const show = h('button', { class: 'btn sm', type: 'button', 'data-testid': 'bl-show', onclick: () => { switchTab(null); Stage.mode = 'rooms'; App.render(); Scene3D.focus('rooms'); } }, 'عرض المبنى في المشهد');
-  return h('div', { class: 'card', 'data-testid': 'bl-card' },
-    h('div', { class: 'card-head' }, h('h2', null, 'مخطط المبنى في المشهد'),
-      h('span', { class: 'badge ' + (cur.custom ? 'ok' : 'info'), 'data-testid': 'bl-mode' }, cur.custom ? 'مخطط مخصص' : 'ترتيب تلقائي'),
-      h('span', { class: 'spacer' }), show, reset),
-    h('p', { class: 'muted small' }, 'يغيّر شكل المبنى في المشهد فقط: صف كل قاعة وموضعها فيه، وغرف أخرى (مكتب، مصلى، مستودع…) تظهر فارغة باسمها. ',
-      'لا يغيّر ترتيب ملء القاعات في التوزيع (الأسهم ▲▼ في جدول القاعات أعلاه)، ولا السعة، ولا أي مخرج. ',
-      'الترتيب في كل صف من أول الممر (عند الباب الزجاجي) إلى آخره (جهة استراحة المراقبين).'),
-    h('div', { class: 'grid-2' }, rowTable('A'), rowTable('B')),
-    h('div', { class: 'card-head', style: { marginTop: '12px', marginBottom: '0' } }, h('b', null, 'إضافة غرفة أخرى: '), addName, addSize, addRow, addBtn),
-    !cur.custom ? h('p', { class: 'muted small' }, 'أول تعديل هنا يثبّت الترتيب الحالي كمخطط مخصص؛ بعدها لا يتغير المبنى عند تغيير ترتيب التعبئة. القاعة الجديدة تُضاف للصف الأقصر.') : null);
-}
-
 const _settingsPhase1 = Views.settings;
 Views.settings = function () {
   const root = _settingsPhase1();
-  root.insertBefore(buildingLayoutCard(), root.children[1]);   // V5.5: بعد بطاقة القاعات
   root.insertBefore(roomsCard(), root.children[1]);
   root.insertBefore(periodsCard(), root.children[1]);
   root.insertBefore(daysCard(), root.children[1]);
@@ -10544,11 +10432,6 @@ function sessionToState(obj) {
   if (!Object.values(st.outputVersions).every(r => isObj(r) && Array.isArray(r.list) && r.list.every(v => isObj(v) && Number.isInteger(v.n) && typeof v.sig === 'string' && typeof v.at === 'string'))) return bad('سجل الإصدارات');
   if (!Object.values(st.slotSnapshots).every(l => Array.isArray(l) && l.every(x => isObj(x) && typeof x.id === 'string' && typeof x.slot === 'string' && isObj(x.dist) && Array.isArray(x.dist.rooms) && x.dist.rooms.every(r => isObj(r) && Array.isArray(r.grid) && r.grid.every(Array.isArray)) && isObj(x.people) && isObj(x.units)))) return bad('اللقطات المعتمدة');
   for (const k of ['periods', 'rooms', 'studentAdjacencyBans', 'supervisors', 'supervisorForbiddenPairs']) if (!Array.isArray(st[k])) return bad(k);
-  // V5.5: مخطط المبنى — null أو صفّان من المعرفات وغرف أخرى باسم وحجم صالحين (المعرف غير المعروف يُهمل عند الرسم)
-  const bl = st.buildingLayout, idList = a => Array.isArray(a) && a.every(x => typeof x === 'string');
-  if (bl !== null && !(isObj(bl) && idList(bl.A) && idList(bl.B) && Array.isArray(bl.others) && bl.others.length <= 50
-    && bl.others.every(o => isObj(o) && typeof o.id === 'string' && /^o[0-9a-z]+$/.test(o.id) && typeof o.name === 'string' && normText(o.name) && o.name.length <= 60 && ['s', 'm', 'l'].includes(o.size))
-    && new Set(bl.others.map(o => o.id)).size === bl.others.length)) return bad('مخطط المبنى');
   for (const k of ['scheduleExclusions', 'roomExclusions', 'knownStatusValues']) if (!isObj(st[k]) || !Array.isArray(st[k].trainee) || !Array.isArray(st[k].reg)) return bad(k);
   if (!st.rooms.every(r => isObj(r) && typeof r.id === 'string' && Number.isInteger(r.cols) && Number.isInteger(r.seats) && r.cols >= 1 && r.cols <= MAX_COLS && r.seats >= 1 && r.seats <= MAX_SEATS)) return bad('القاعات');
   if (!st.periods.every(p => isObj(p) && typeof p.id === 'string' && typeof p.name === 'string')) return bad('الفترات');
@@ -11556,9 +11439,6 @@ function courseAccounting(c) {
      الحلقة تحت الهدف: خضراء = مسموح، صفراء = سيصير مراقبا القاعة من نفس التصنيف (يظهر تنبيه قبل التنفيذ)، حمراء = مرفوض.
      التنفيذ عبر setSupervisorManually و swapSupervisorsManually (وحدة 29) بكل فحوصهما. */
 
-/** V5.5: أحجام «الغرف الأخرى» في مخطط المبنى (عرضها على امتداد الممر). الكبيرة بعرض قاعة من 4 أعمدة. */
-const OTHER_ROOM_SIZES = { s: { label: 'صغيرة', w: 3.6 }, m: { label: 'متوسطة', w: 5.8 }, l: { label: 'كبيرة', w: 7.8 } };
-
 const Stage = { mode: 'rooms', slot: null, sel: null, listTab: 'courses', theme: 'green', motion: true };
 
 const Scene3D = (() => {
@@ -11659,91 +11539,73 @@ const Scene3D = (() => {
     if (!silent) sync();
   }
 
-  /* ---------- المخطط: أين يقع كل شيء ---------- */
+  /* ---------- المخطط: مبنى كلية السليل التقنية كما وصفه المستخدم (V5.5) ----------
+   *  منظر من فوق والمدخل جهة ساحة الجدول: تدخل وعلى جانبيك غرف (معمل، معمل | مقر اللجنة، معمل)، ثم ممر عرضي بطول المبنى
+   *  مفتوح على ممرين طوليين. يمين: 5 (تحت) 6 7 (فوق). الوسط: 8 (فوق)، 4 مكاتب، 11 (تحت). يسار: 14 (فوق) 15 16 (تحت).
+   *  القاعة طولية: السبورة على جدار الممر بجانب الباب، والمتدربون ينظرون إليها؛ العمود 1 على يمين الجالس والمقعد 1 في الأمام.
+   *  أبواب الصفين البعيدين في طرفهما القريب من المدخل، وأبواب الصف القريب (5، 11، 16) في طرفها البعيد.
+   *  القاعة تأخذ مكانها برقمها؛ قاعة بلا مكان تأخذ مكان 14 (إن لم تكن 14 قاعة اختبار)، والباقي يُنبَّه عليه. */
   const TILE = 10, GAP = 1.4, PITCH = TILE + GAP, TILE_Y = 0.5;
   const PX = 1.35, PZ = 1.6, FRONT = 3.4, BACK = 1.1, MZ = 0.7;
   const CH_W = 0.92, CH_D = 0.8, CH_P = 1.3, CH_ROW = 2.1, SEAT_TOP = 0.56;   // الكرسي: عرضه وعمقه، المسافة بين كرسيين متجاورين، بين صفّين، وارتفاع المقعد
-  const WALL = 0.3, CORR = 3.8, FORE = 11, LOBBY = 7.5, TALL = 5.6;   // سماكة الجدار، عرض الممر، الساحة الأمامية، بهو المدخل، ارتفاع الواجهتين الخلفيتين
-  /** مبنى الكلية (شكل عام، ليس مخططًا هندسيًا للمبنى الفعلي): صفّان من القاعات على جانبي ممر أوسط.
-   *  الترتيب التلقائي (S.buildingLayout = null): القاعات بترتيبها في الإعدادات — النصف الأول في الصف الخلفي، والباقي في الصف الأمامي ومعه بهو المدخل.
-   *  V5.5: مخطط مستقل (S.buildingLayout) يحدد صف كل قاعة وموضعها، ويضيف غرفًا أخرى (مكتب، مصلى…) تُرسم فارغة باسمها،
-   *  ولا يغيّر ترتيب ملء القاعات في التوزيع ولا أي مخرج.
-   *  كل قاعة تُرسم بأعمدتها ومقاعدها الفعلية (cols × seats) — العمود 1 على يمين الجالس والمقعد 1 في الأمام. */
-  const roomSeg = r => { const cols = Math.max(1, r.cols | 0), seats = Math.max(1, r.seats | 0);
-    return { type: 'room', id: r.id, num: r.num, cols, seats, depth: FRONT + seats * PX + BACK, width: cols * PZ + MZ * 2 }; };
-  const segsLen = list => list.reduce((a, x) => a + x.width, 0) + Math.max(0, list.length - 1) * WALL;
-  /** صفّا المبنى قبل موازنة الطول: { segA, segB, lobby, custom } */
-  function layoutRows(rs) {
-    const lobby = { type: 'lobby', id: 'lobby', width: LOBBY }, bl = S.buildingLayout;
-    if (!bl) {
-      const nA = Math.ceil(rs.length / 2), rowA = rs.slice(0, nA), rowB = rs.slice(nA);
-      // بهو المدخل في الصف الأمامي عند أقرب موضع لمنتصفه
-      let segB = [lobby], bestD = Infinity;
-      for (let i = 0; i <= rowB.length; i++) {
-        const list = rowB.slice(0, i).concat([lobby], rowB.slice(i)), c = segsLen(list.slice(0, i)) + (i ? WALL : 0) + LOBBY / 2, d = Math.abs(c - segsLen(list) / 2);
-        if (d < bestD - 1e-6) { bestD = d; segB = list; }
-      }
-      return { segA: rowA.slice(), segB, lobby, custom: false };
-    }
-    // المخطط المستقل بعد تنظيفه: معرّف غير معروف يُهمل، والمكرر يُؤخذ أول مرة، والبهو في الصف الأمامي دائمًا (في منتصفه إن غاب)،
-    // وقاعة أُضيفت في الإعدادات بعد آخر تعديل للمخطط تُلحق بالصف الأقصر، والغرفة الأخرى غير الموضوعة تُلحق بالصف الخلفي.
-    const byId = new Map(rs.map(r => [r.id, r]));
-    for (const x of bl.others || []) if (!byId.has(x.id)) byId.set(x.id, { type: 'other', id: x.id, name: x.name, size: x.size, width: (OTHER_ROOM_SIZES[x.size] || OTHER_ROOM_SIZES.m).w });
-    const seen = new Set(), take = (ids, front) => (ids || []).map(id => {
-      if (seen.has(id)) return null;
-      const x = id === 'lobby' ? (front ? lobby : null) : byId.get(id); if (!x) return null;
-      seen.add(id); return x; }).filter(Boolean);
-    const segA = take(bl.A, false), segB = take(bl.B, true);
-    if (!seen.has('lobby')) segB.splice(Math.floor(segB.length / 2), 0, lobby);
-    for (const r of rs) if (!seen.has(r.id)) { (segsLen(segA) <= segsLen(segB) ? segA : segB).push(r); seen.add(r.id); }
-    for (const x of byId.values()) if (!seen.has(x.id)) { segA.push(x); seen.add(x.id); }
-    return { segA, segB, lobby, custom: true };
-  }
-  /** V5.5 — لبطاقة «مخطط المبنى» في الإعدادات: الصفّان كما يُرسمان الآن (قبل موازنة الطول). لا يحتاج WebGL.
-   *  office: عرض مكتب «لجنة الاختبارات» الذي يضيفه الترتيب التلقائي (0 إن لم يوجد). */
-  function buildingRows() {
-    const R = layoutRows(S.rooms.map(roomSeg));
-    const item = x => x.type === 'room' ? { type: 'room', id: x.id, num: x.num, cols: x.cols, seats: x.seats }
-      : x.type === 'lobby' ? { type: 'lobby', id: 'lobby' } : { type: 'other', id: x.id, name: x.name, size: x.size };
-    let office = 0;
-    if (!R.custom) { const lA = segsLen(R.segA), lB = segsLen(R.segB); if (lA < lB && (lB - lA >= 3.6 || !R.segA.length)) office = lB - lA - (R.segA.length ? WALL : 0); }
-    return { custom: R.custom, A: R.segA.map(item), B: R.segB.map(item), office };
-  }
+  const WALL = 0.3, CORR = 3.8, FORE = 11, HALL = 4.6, ENTW = 4.6, TALL = 5.6;   // سماكة الجدار، عرض الممر الطولي، المسافة لساحة الجدول، الممر العرضي، ممر المدخل، ارتفاع الواجهتين الخلفيتين
+  /** أماكن القاعات: col = W (يسار المدخل) | M (الوسط) | E (يمين المدخل)، tier = 0 (الأبعد عن المدخل) … 2 (الأقرب) */
+  const ROOM_SLOTS = [
+    { num: '7', col: 'E', tier: 0 }, { num: '6', col: 'E', tier: 1 }, { num: '5', col: 'E', tier: 2 },
+    { num: '8', col: 'M', tier: 0 }, { num: '11', col: 'M', tier: 2 },
+    { num: '14', col: 'W', tier: 0 }, { num: '15', col: 'W', tier: 1 }, { num: '16', col: 'W', tier: 2 },
+  ];
+  const numKey = v => normText(v).replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+  /** نقطة القاعة: الأصل على جدار السبورة عند العمود 1، d = إلى داخل القاعة، w = اتجاه الأعمدة */
+  function loc(r, a, b) { return { x: r.O.x + r.d.x * a + r.w.x * b, z: r.O.z + r.d.z * a + r.w.z * b }; }
   function computeLayout() {
     const nD = S.days.length, nP = S.periods.length;
     const o = { nD, nP, boardW: Math.max(1, nP) * PITCH - GAP, boardL: Math.max(1, nD) * PITCH - GAP, rooms: [], roomById: new Map() };
-    const rs = S.rooms.map(roomSeg), R = layoutRows(rs), len = segsLen;
-    const segA = R.segA, segB = R.segB, lobby = R.lobby, lA = len(segA), lB = len(segB);
-    if (lB < lA) lobby.width += lA - lB;                                         // البهو يتسع ليتساوى طول الصفّين
-    else if (lA < lB) { const diff = lB - lA; if (diff >= 3.6 || !segA.length) segA.push({ type: 'office', auto: !R.custom, width: diff - (segA.length ? WALL : 0) }); else segA[segA.length - 1].width += diff; }
-    const bL = Math.max(len(segA), len(segB));
-    const depths = list => list.filter(x => x.type === 'room').map(r => r.depth);
-    o.dA = Math.max(11, ...depths(segA)); o.dB = Math.max(9, ...depths(segB));
-    o.bx1 = -FORE; o.b0x = o.bx1 - WALL - o.dB; o.cx1 = o.b0x - WALL; o.cx0 = o.cx1 - CORR; o.ax0 = o.cx0 - WALL - o.dA; o.bx0 = o.ax0 - WALL;
-    let zl = 0; for (const x of segB) { if (x === lobby) break; zl += x.width + WALL; }
-    o.bz0 = o.boardL / 2 - (zl + lobby.width / 2); o.bz1 = o.bz0 + bL;           // المدخل في محاذاة منتصف ساحة الجدول
-    const place = (segs, row, x0, rowDepth) => { let z = o.bz0; for (const x of segs) { x.z0 = z; x.z1 = z + x.width; x.x0 = x0; x.rowDepth = rowDepth; x.row = row; z = x.z1 + WALL; } };
-    place(segA, 'A', o.ax0, o.dA); place(segB, 'B', o.b0x, o.dB);
-    o.rooms = rs; for (const r of rs) o.roomById.set(r.id, r);
-    o.segA = segA; o.segB = segB; o.lobby = lobby; o.entZ = lobby.z0 + lobby.width / 2;
-    // استراحة المراقبين في نهاية الممر: كرسي لكل مراقب مؤهل بترتيب restRoster — المجموعة أ جهة الصف الخلفي، وب جهة الصف الأمامي. الكراسي صفوف تواجه الناظر.
-    const roster = restRoster(), nGA = roster.filter(x => x.group === 'A').length, nGB = roster.length - nGA;
-    o.bzE = o.bz1; o.rest = null;
-    if (roster.length) {
-      const perA = Math.max(1, Math.floor((o.dA - 1.2) / CH_P)), perB = Math.max(1, Math.floor((o.dB - 1.2) / CH_P));
-      const nRows = Math.max(1, Math.ceil(nGA / perA), Math.ceil(nGB / perB)), z0 = o.bz1 + WALL;
-      const rest = { z0, z1: z0 + Math.max(4.4, 1.2 + (nRows - 1) * CH_ROW + CH_D + 1.3), x0: o.ax0, x1: o.bx1 - WALL, chairs: [], chairOf: new Map(), nA: nGA, nB: nGB };
-      let ia = 0, ib = 0;
-      for (const sp of roster) {
-        const isA = sp.group === 'A', i = isA ? ia++ : ib++, per = isA ? perA : perB, bx = isA ? o.ax0 : o.b0x, depth = isA ? o.dA : o.dB;
-        const ch = { i: rest.chairs.length, supId: sp.id, group: sp.group, x: bx + (depth - per * CH_P) / 2 + ((i % per) + 0.5) * CH_P, z: z0 + 1.2 + Math.floor(i / per) * CH_ROW + CH_D / 2 };
-        rest.chairs.push(ch); rest.chairOf.set(sp.id, ch);
-      }
-      o.rest = rest; o.bzE = rest.z1;
-    }
+    // من يجلس أين: بالرقم، ثم أول قاعة بلا مكان في مكان 14
+    const bySlot = new Map(), placed = new Set();
+    for (const sl of ROOM_SLOTS) { const r = S.rooms.find(x => numKey(x.num) === sl.num && !placed.has(x.id)); if (r) { bySlot.set(sl, r); placed.add(r.id); } }
+    const rest14 = ROOM_SLOTS.find(sl => sl.num === '14'), loose = S.rooms.filter(r => !placed.has(r.id));
+    if (!bySlot.has(rest14) && loose.length) { bySlot.set(rest14, loose[0]); placed.add(loose[0].id); }
+    o.unplaced = S.rooms.filter(r => !placed.has(r.id)).map(r => r.num);
+    const dims = r => ({ cols: Math.max(1, r.cols | 0), seats: Math.max(1, r.seats | 0) });
+    const RD = Math.max(12, ...Array.from(bySlot.values()).map(r => FRONT + dims(r).seats * PX + BACK + 0.6));
+    const RW = Math.max(7.8, ...Array.from(bySlot.values()).map(r => dims(r).cols * PZ + MZ * 2));
+    const Xtot = 3 * RD + 2 * CORR, e0 = Xtot / 2 - ENTW / 2, e1 = Xtot / 2 + ENTW / 2;
+    // مقر اللجنة: كرسي لكل مراقب مؤهل — المجموعة أ أولًا ثم ب (ترتيب restRoster)
+    const roster = restRoster(), nGA = roster.filter(x => x.group === 'A').length;
+    const cw = Xtot - RD - e1, rowsFit = Math.max(1, Math.floor((cw - 1.4) / CH_ROW));
+    const SD = Math.max(9, 1.4 + Math.ceil(Math.max(1, roster.length) / rowsFit) * CH_P + 0.8);
+    const yH0 = 3 * RW, yH1 = yH0 + HALL, Ytot = yH1 + SD;
+    const bx1 = -FORE, bx0 = bx1 - Ytot, zOff = o.boardL / 2 - Xtot / 2;
+    const W = (px, py) => ({ x: bx1 - (Ytot - py), z: zOff + (Xtot - px) });   // من المخطط إلى المشهد
+    const V = (dpx, dpy) => ({ x: dpy, z: -dpx });
+    Object.assign(o, { RD, RW, Xtot, Ytot, e0, e1, yH0, yH1, SD, bx0, bx1, bz0: zOff, bzE: zOff + Xtot, entZ: zOff + Xtot / 2, W, V });
+    const colX = { W: [0, RD], M: [RD + CORR, 2 * RD + CORR], E: [2 * RD + 2 * CORR, Xtot] };
+    const boardX = { W: RD, M: 2 * RD + CORR, E: 2 * RD + 2 * CORR }, into = { W: -1, M: -1, E: 1 };
+    o.slots = ROOM_SLOTS.map(sl => {
+      const r = bySlot.get(sl), [px0, px1] = colX[sl.col], py0 = sl.tier * RW, py1 = py0 + RW;
+      const d = V(into[sl.col], 0), w = { x: -d.z, z: d.x };
+      const A = W(boardX[sl.col], py0), B = W(boardX[sl.col], py1);
+      const O = ((B.x - A.x) * w.x + (B.z - A.z) * w.z) > 0 ? A : B;
+      const c1 = W(px0, py0), c2 = W(px1, py1);
+      const g = { slot: sl, px0, px1, py0, py1, bwx: boardX[sl.col], doorSouth: sl.tier < 2, O, d, w, depth: RD, width: RW,
+        x0: Math.min(c1.x, c2.x), x1: Math.max(c1.x, c2.x), z0: Math.min(c1.z, c2.z), z1: Math.max(c1.z, c2.z) };
+      if (r) { const dm = dims(r); Object.assign(g, { type: 'room', id: r.id, num: r.num, cols: dm.cols, seats: dm.seats }); o.rooms.push(g); o.roomById.set(r.id, g); }
+      else Object.assign(g, { type: 'static', num: sl.num, cols: 4, seats: 6 });
+      return g;
+    });
+    // مقر اللجنة وكراسيه (الكراسي صفوف تواجه ممر المدخل)
+    const c1 = W(e1, yH1), c2 = W(Xtot - RD, Ytot);
+    const rest = { x0: Math.min(c1.x, c2.x), x1: Math.max(c1.x, c2.x), z0: Math.min(c1.z, c2.z), z1: Math.max(c1.z, c2.z), chairs: [], chairOf: new Map(), nA: nGA, nB: roster.length - nGA };
+    const per = Math.max(1, Math.ceil(Math.max(1, roster.length) / rowsFit));
+    roster.forEach((sp, i) => {
+      const row = Math.floor(i / per), k = i % per;
+      const ch = { i, supId: sp.id, group: sp.group, x: rest.x0 + 1.2 + (k + 0.5) * CH_P, z: rest.z1 - 1.0 - CH_D / 2 - row * CH_ROW };
+      rest.chairs.push(ch); rest.chairOf.set(sp.id, ch);
+    });
+    o.rest = rest;
     o.zMin = Math.min(o.bz0, 0); o.zMax = Math.max(o.bzE, o.boardL); o.len = o.zMax - o.zMin;
-    o.custom = R.custom;
-    o.sig = [nD, nP, S.rooms.map(r => r.id + ':' + r.cols + 'x' + r.seats).join(','), Stage.theme, roster.map(x => x.id + x.group).join(','), JSON.stringify(S.buildingLayout || null)].join('|');
+    o.sig = [nD, nP, S.rooms.map(r => r.id + ':' + r.num + ':' + r.cols + 'x' + r.seats).join(','), Stage.theme, roster.map(x => x.id + x.group).join(',')].join('|');
     return o;
   }
   function tileCenter(di, pi) { return { x: pi * PITCH + TILE / 2, z: di * PITCH + TILE / 2 }; }
@@ -11753,12 +11615,13 @@ const Scene3D = (() => {
     if (pi < 0 || di < 0 || pi >= L.nP || di >= L.nD) return null;
     return slotKey(S.days[di].id, S.periods[pi].id);
   }
-  function seatPos(room, c, s) { return { x: room.x0 + FRONT + s * PX + 0.3, z: room.z0 + MZ + c * PZ + PZ / 2 }; }
+  function seatPos(room, c, s) { return loc(room, FRONT + s * PX + 0.3, MZ + c * PZ + PZ / 2); }
   function seatAt(x, z) { // أقرب مقعد لموضع متدرب (المتدرب يجلس خلف طاولته بـ 0.52)
     if (!L) return null;
     for (const room of L.rooms) {
-      if (z < room.z0 - 0.15 || z > room.z1 + 0.15 || x < room.x0 - 0.2 || x > room.x0 + room.rowDepth + 0.3) continue;
-      const c = Math.round((z - room.z0 - MZ - PZ / 2) / PZ), s = Math.round((x - room.x0 - FRONT - 0.82) / PX);
+      const a = (x - room.O.x) * room.d.x + (z - room.O.z) * room.d.z, b = (x - room.O.x) * room.w.x + (z - room.O.z) * room.w.z;
+      if (a < -0.2 || a > room.depth + 0.3 || b < -0.15 || b > room.width + 0.15) continue;
+      const c = Math.round((b - MZ - PZ / 2) / PZ), s = Math.round((a - FRONT - 0.82) / PX);
       if (c < 0 || s < 0 || c >= room.cols || s >= room.seats) return null;
       return { roomId: room.id, c, s };
     }
@@ -11781,100 +11644,123 @@ const Scene3D = (() => {
     buildDesks();
   }
 
-  /** مبنى الكلية بطريقة «المقطع»: الواجهتان الخلفيتان بارتفاع دورين، وجدران الداخل والواجهة الأمامية مقطوعة ليظهر ما بداخل القاعات. */
+  /** مبنى الكلية بطريقة «المقطع»: الواجهتان البعيدتان بارتفاع دورين، وجدران الداخل والواجهتان القريبتان منخفضة ليظهر ما بالداخل.
+   *  كل الرسم بإحداثيات المخطط (px شرقًا، py نحو المدخل) ثم يُحوَّل للمشهد. */
   function buildBuilding(add) {
-    const { bx0, bx1, bz0, bz1, cx0, cx1, ax0, b0x, dA, dB } = L, bzc = (bz0 + bz1) / 2, bL = bz1 - bz0, bD = bx1 - bx0, cxc = (cx0 + cx1) / 2;
-    const zE = L.bzE, oL = zE - bz0, ozc = (bz0 + zE) / 2;   // الغلاف الخارجي للمبنى يشمل جناح الاستراحة
+    const { RD, RW, Xtot, Ytot, e0, e1, yH0, yH1, W } = L;
+    const rect = (px0, px1, py0, py1) => { const a = W(px0, py0), b = W(px1, py1); return { x0: Math.min(a.x, b.x), x1: Math.max(a.x, b.x), z0: Math.min(a.z, b.z), z1: Math.max(a.z, b.z) }; };
+    const slab = (px0, px1, py0, py1, color, y, h) => { const r = rect(px0, px1, py0, py1); return add(box(r.x1 - r.x0, h || 0.14, r.z1 - r.z0, color, (r.x0 + r.x1) / 2, y === undefined ? 0.07 : y, (r.z0 + r.z1) / 2, false)); };
     const cap = (w, d, x, h, z) => add(box(w + 0.04, 0.07, d + 0.04, P.cut, x, h + 0.035, z, false));
-    const wallAlongZ = (x, z0, z1, h) => { if (z1 - z0 < 0.05) return; add(box(WALL, h, z1 - z0, P.wall, x, h / 2, (z0 + z1) / 2)); cap(WALL, z1 - z0, x, h, (z0 + z1) / 2); };
-    const wallAlongX = (z, x0, x1, h) => { if (x1 - x0 < 0.05) return; add(box(x1 - x0, h, WALL, P.wall, (x0 + x1) / 2, h / 2, z)); cap(x1 - x0, WALL, (x0 + x1) / 2, h, z); };
-    const door = (x, z, dir, h) => { const g = new T.Group(), leaf = mesh(new T.BoxGeometry(0.07, h, 1.3), lam(P.wood)); leaf.position.set(0, h / 2, dir * 0.65); g.add(leaf); g.position.set(x, 0.14, z); g.rotation.y = 1.0; add(g); };
-    const roomObj = (room, floorDepth, fx) => {
-      const g = new T.Group(), floorMat = ownMat(P.floor);
-      const floor = mesh(new T.BoxGeometry(floorDepth, 0.14, room.z1 - room.z0), floorMat, false); floor.userData.ownMat = true;
-      floor.position.set(fx, 0.07, (room.z0 + room.z1) / 2); floor.userData.pick = { type: 'room', roomId: room.id }; g.add(floor);
-      gRooms.add(g); roomObjs.set(room.id, { g, floor, floorMat, room, state: '' });
-      return g;
+    /** جدار مستقيم على خط في المخطط (أفقي أو رأسي) مع فتحات [من، إلى] */
+    const wall = (px0, py0, px1, py1, h, gaps) => {
+      const vert = px0 === px1, a0 = vert ? Math.min(py0, py1) : Math.min(px0, px1), a1 = vert ? Math.max(py0, py1) : Math.max(px0, px1);
+      const segs = []; let cur = a0;
+      for (const [g0, g1] of (gaps || []).slice().sort((p, q) => p[0] - q[0])) { if (g0 > cur) segs.push([cur, g0]); cur = Math.max(cur, g1); }
+      if (cur < a1) segs.push([cur, a1]);
+      for (const [s0, s1] of segs) {
+        if (s1 - s0 < 0.05) continue;
+        const r = vert ? rect(px0 - WALL / 2, px0 + WALL / 2, s0, s1) : rect(s0, s1, py0 - WALL / 2, py0 + WALL / 2);
+        add(box(r.x1 - r.x0, h, r.z1 - r.z0, P.wall, (r.x0 + r.x1) / 2, h / 2, (r.z0 + r.z1) / 2)); cap(r.x1 - r.x0, r.z1 - r.z0, (r.x0 + r.x1) / 2, h, (r.z0 + r.z1) / 2);
+      }
     };
-    // بلاطة المبنى والممر الأوسط
-    add(box(bD + 0.9, 0.3, oL + WALL * 2 + 0.9, P.base, (bx0 + bx1) / 2, -0.15, ozc));
-    add(box(CORR, 0.1, bL, P.corr, cxc, 0.05, bzc, false));
-    for (const x of [cx0 + 0.45, cx1 - 0.45]) add(box(0.1, 0.012, bL, P.trim, x, 0.106, bzc, false));
-    // الواجهتان الخلفيتان (دوران) بإفريز علوي ونوافذ الدور العلوي
-    add(box(WALL, TALL, oL + WALL, P.wall, bx0 + WALL / 2, TALL / 2, ozc - WALL / 2));
-    add(box(bD, TALL, WALL, P.wall, (bx0 + bx1) / 2, TALL / 2, bz0 - WALL / 2));
-    add(box(WALL + 0.22, 0.3, oL + WALL + 0.22, P.trim, bx0 + WALL / 2, TALL + 0.15, ozc - WALL / 2));
-    add(box(bD + 0.22, 0.3, WALL + 0.22, P.trim, (bx0 + bx1) / 2, TALL + 0.15, bz0 - WALL / 2));
-    add(box(0.05, 0.14, oL, P.line, ax0 + 0.03, 3.05, ozc, false)); add(box(bD - WALL, 0.14, 0.05, P.line, (bx0 + bx1 + WALL) / 2, 3.05, bz0 + 0.03, false));
-    for (let z = bz0 + 1.9; z < zE - 1.1; z += 3.1) add(box(0.07, 1.25, 1.7, P.glass, ax0 + 0.04, 4.15, z, false));
-    for (let x = bx0 + 2.3; x < bx1 - 1.1; x += 3.1) { add(box(1.7, 1.25, 0.07, P.glass, x, 4.15, bz0 + 0.04, false)); if (x < cx0 - 1.2 || x > cx1 + 1.2) add(box(1.7, 1.1, 0.07, P.glass, x, 1.75, bz0 + 0.04, false)); }
-    add(box(2.0, 2.35, 0.08, P.glass, cxc, 1.17, bz0 + 0.04, false));                                      // باب نهاية الممر
-    // الصف الخلفي: السبورة على الواجهة الخلفية، والباب على الممر
-    const xa = ax0 + dA + WALL / 2;
-    L.segA.forEach((sg, i) => {
-      const zc2 = (sg.z0 + sg.z1) / 2, last = i === L.segA.length - 1;
-      if (sg.type === 'room') {
-        const g = roomObj(sg, dA, ax0 + dA / 2);
-        const wb = box(0.1, 1.1, Math.min(sg.cols * PZ + MZ * 2 - 1.4, 4.6), P.board, ax0 + 0.06, 1.5, sg.z0 + (sg.cols * PZ + MZ * 2) / 2, false); wb.userData.pick = { type: 'room', roomId: sg.id }; g.add(wb);
-        wallAlongZ(xa, sg.z0 - WALL, sg.z1 - 1.5, 0.9); door(xa, sg.z1 - 1.5, 1, 0.9);
+    /** باب مفتوح: مفصله عند (px,py)، ويمتد بزاوية نحو داخل الغرفة */
+    const door = (px, py, alongPx, alongPy, inPx, inPy, h) => {
+      const p = W(px, py), v = L.V(alongPx * 0.5 + inPx * 0.87, alongPy * 0.5 + inPy * 0.87);
+      const g = new T.Group(), leaf = mesh(new T.BoxGeometry(0.07, h, 1.3), lam(P.wood)); leaf.position.set(0, h / 2, 0.65); g.add(leaf);
+      g.position.set(p.x, 0.14, p.z); g.rotation.y = Math.atan2(v.x, v.z); add(g);
+    };
+    /** باب مغلق في فتحة جدار (المكاتب والمعامل — قرار المستخدم) */
+    const shut = (px0, py0, px1, py1, h) => { const r = px0 === px1 ? rect(px0 - WALL / 2 + 0.05, px0 + WALL / 2 - 0.05, py0, py1) : rect(px0, px1, py0 - WALL / 2 + 0.05, py0 + WALL / 2 - 0.05);
+      add(box(r.x1 - r.x0, h, r.z1 - r.z0, P.wood, (r.x0 + r.x1) / 2, h / 2, (r.z0 + r.z1) / 2)); };
+    const label = (id, px, py, text, cls) => { const p = W(px, py); setLabel(id, { x: p.x, y: 1.4, z: p.z, text, cls: cls || 'room idle', maxUpp: 0.09 }); };
+    // البلاطة والأرضيات
+    { const r = rect(-0.45, Xtot + 0.45, -0.45, Ytot + 0.45); add(box(r.x1 - r.x0, 0.3, r.z1 - r.z0, P.base, (r.x0 + r.x1) / 2, -0.15, (r.z0 + r.z1) / 2)); }
+    for (const [a, b] of [[RD, RD + CORR], [2 * RD + CORR, 2 * RD + 2 * CORR]]) slab(a, b, 0, yH0, P.corr, 0.05, 0.1);
+    slab(0, Xtot, yH0, yH1, P.corr, 0.05, 0.1);
+    slab(e0, e1, yH1, Ytot, P.lobby);
+    for (const [a, b] of [[RD, RD + CORR], [2 * RD + CORR, 2 * RD + 2 * CORR]]) { const m = (a + b) / 2; slab(m - 0.05, m + 0.05, 0.6, yH0 + HALL / 2, P.trim, 0.106, 0.012); }
+    slab(0.6, Xtot - 0.6, yH0 + HALL / 2 - 0.05, yH0 + HALL / 2 + 0.05, P.trim, 0.106, 0.012);
+    // الواجهتان البعيدتان (دوران) بنوافذ، والقريبتان منخفضة
+    const north = rect(-WALL, Xtot + WALL, -WALL, 0), east = rect(Xtot, Xtot + WALL, -WALL, Ytot + WALL);
+    for (const r of [north, east]) { add(box(r.x1 - r.x0, TALL, r.z1 - r.z0, P.wall, (r.x0 + r.x1) / 2, TALL / 2, (r.z0 + r.z1) / 2)); add(box(r.x1 - r.x0 + 0.22, 0.3, r.z1 - r.z0 + 0.22, P.trim, (r.x0 + r.x1) / 2, TALL + 0.15, (r.z0 + r.z1) / 2)); }
+    for (let px = 1.6; px < Xtot - 1; px += 3.1) { const p = W(px, 0); add(box(0.07, 1.25, 1.7, P.glass, north.x1 + 0.04, 4.15, p.z, false)); }
+    for (let py = 1.6; py < Ytot - 1; py += 3.1) { const p = W(Xtot, py); add(box(1.7, 1.25, 0.07, P.glass, p.x, 4.15, east.z1 + 0.04, false)); }
+    wall(0, 0, 0, Ytot, 0.6);                                                      // الواجهة الغربية (منخفضة)
+    wall(0, Ytot, Xtot, Ytot, 0.6, [[e0 + 0.3, e1 - 0.3]]);                        // الواجهة الأمامية وفيها المدخل
+    // القاعات الثمان: جدار الممر فيه الباب والسبورة بجانبه
+    for (const g of L.slots) {
+      const dS = g.doorSouth, gap = dS ? [g.py1 - 1.75, g.py1 - 0.35] : [g.py0 + 0.35, g.py0 + 1.75];
+      g.doorGap = gap;
+      const inPx = g.slot.col === 'E' ? 1 : -1;
+      door(g.bwx, dS ? gap[1] : gap[0], 0, dS ? -1 : 1, inPx, 0, 1.25);
+      // السبورة على جدار الممر من الداخل، بجانب الباب
+      const b0 = dS ? gap[0] - 0.5 - 2.8 : gap[1] + 0.5, b1 = b0 + 2.8, off = inPx * (WALL / 2 + 0.05);
+      const r = rect(g.bwx + off - 0.04, g.bwx + off + 0.04, b0, b1);
+      const wb = add(box(r.x1 - r.x0, 1.1, r.z1 - r.z0, P.board, (r.x0 + r.x1) / 2, 1.45, (r.z0 + r.z1) / 2, false));
+      if (g.type === 'room') {
+        const grp = new T.Group(), floorMat = ownMat(P.floor), fr = rect(g.px0, g.px1, g.py0, g.py1);
+        const floor = mesh(new T.BoxGeometry(fr.x1 - fr.x0, 0.14, fr.z1 - fr.z0), floorMat, false); floor.userData.ownMat = true;
+        floor.position.set((fr.x0 + fr.x1) / 2, 0.07, (fr.z0 + fr.z1) / 2); floor.userData.pick = { type: 'room', roomId: g.id }; grp.add(floor);
+        wb.userData.pick = { type: 'room', roomId: g.id };
+        gRooms.add(grp); roomObjs.set(g.id, { g: grp, floor, floorMat, room: g, state: '' });
       } else {
-        add(box(dA, 0.14, sg.z1 - sg.z0, P.floorIdle, ax0 + dA / 2, 0.07, zc2, false));
-        wallAlongZ(xa, sg.z0 - WALL, sg.z1 - 1.5, 0.9); door(xa, sg.z1 - 1.5, 1, 0.9);
-        // المكتب التلقائي «لجنة الاختبارات» في الترتيب التلقائي فقط؛ في المخطط المستقل الفراغ الزائد يبقى فارغًا بلا اسم
-        if (sg.type === 'office' && sg.auto && sg.z1 - sg.z0 > 3) { add(rbox(0.85, 0.75, 1.9, 0.08, P.wood, ax0 + dA / 2, 0.52, zc2)); add(box(0.55, 1.5, Math.min(2.4, sg.z1 - sg.z0 - 1), P.deskIdle, ax0 + 0.4, 0.89, zc2));
-          setLabel('x:office', { x: ax0 + dA / 2, y: 1.6, z: zc2, text: 'لجنة الاختبارات', cls: 'room idle', maxUpp: 0.075 }); }
-        if (sg.type === 'other') setLabel('x:other:' + sg.id, { x: ax0 + dA / 2, y: 1.6, z: zc2, text: sg.name, cls: 'room idle', maxUpp: 0.075 });
+        // مكان قاعة بلا قاعة اختبار (عادة 14): تُرسم فارغة بطاولات ثابتة، ولا تدخل التوزيع
+        slab(g.px0, g.px1, g.py0, g.py1, P.floorIdle);
+        for (let c = 0; c < 4; c++) for (let s = 0; s < 6; s++) { const p = loc(g, FRONT + s * PX + 0.3, MZ + c * PZ + PZ / 2), alongZ = Math.abs(g.d.z) > 0.5;
+          add(box(alongZ ? 1.05 : 0.5, 0.62, alongZ ? 0.5 : 1.05, P.deskIdle, p.x, 0.45, p.z)); }
+        label('x:r' + g.num, (g.px0 + g.px1) / 2, (g.py0 + g.py1) / 2, 'قاعة ' + g.num);
       }
-      if (!last) wallAlongX(sg.z1 + WALL / 2, ax0, ax0 + dA + WALL, 1.1);
-    });
-    if (!L.segA.some(sg => sg.type === 'office' && sg.auto && sg.z1 - sg.z0 > 3)) dropLabel('x:office');
-    // الصف الأمامي: السبورة والباب جهة الممر، والواجهة الأمامية مقطوعة
-    const xb = b0x - WALL / 2, xn = bx1 - WALL / 2;
-    L.segB.forEach((sg, i) => {
-      const zc2 = (sg.z0 + sg.z1) / 2, last = i === L.segB.length - 1;
-      if (sg.type === 'room') {
-        const g = roomObj(sg, dB, b0x + dB / 2), rw = sg.cols * PZ + MZ * 2;
-        const wb = box(0.08, 0.72, Math.max(1.2, Math.min(rw - 3.2, 4)), P.board, b0x + 0.05, 0.86, sg.z0 + 1.5 + (rw - 1.5) / 2, false); wb.userData.pick = { type: 'room', roomId: sg.id }; g.add(wb);
-        wallAlongZ(xb, sg.z0 + 1.5, sg.z1 + WALL, 1.25); door(xb, sg.z0 + 1.5, -1, 1.25);
-        wallAlongZ(xn, sg.z0 - WALL, sg.z1 + WALL, 0.6);
-      } else if (sg.type === 'other') {
-        // غرفة أخرى في الصف الأمامي: أرضية فارغة باسمها، وبابها على الممر مثل القاعات
-        add(box(dB, 0.14, sg.z1 - sg.z0, P.floorIdle, b0x + dB / 2, 0.07, zc2, false));
-        wallAlongZ(xb, sg.z0 + 1.5, sg.z1 + WALL, 1.25); door(xb, sg.z0 + 1.5, -1, 1.25);
-        wallAlongZ(xn, sg.z0 - WALL, sg.z1 + WALL, 0.6);
-        setLabel('x:other:' + sg.id, { x: b0x + dB / 2, y: 1.6, z: zc2, text: sg.name, cls: 'room idle', maxUpp: 0.075 });
-      } else {
-        // بهو المدخل: مفتوح على الممر، وفي الواجهة الأمامية فتحة الباب الزجاجي
-        add(box(bx1 - WALL - cx1, 0.14, sg.z1 - sg.z0, P.lobby, (cx1 + bx1 - WALL) / 2, 0.07, zc2, false));
-        wallAlongZ(xn, sg.z0 - WALL, L.entZ - 1.9, 0.6); wallAlongZ(xn, L.entZ + 1.9, sg.z1 + WALL, 0.6);
-        for (const sgn of [-1, 1]) add(box(0.06, 1.5, 1.15, P.glass, xn, 0.89, L.entZ + sgn * 1.3, false));
-        add(box(1.7, 0.03, 3.2, P.trim, bx1 - 1.5, 0.155, L.entZ, false));                                 // سجادة المدخل
-        add(rbox(1.0, 0.95, Math.min(3.0, sg.z1 - sg.z0 - 2.5), 0.12, P.wood, b0x + 1.6, 0.62, sg.z0 + 0.4 + Math.min(3.0, sg.z1 - sg.z0 - 2.5) / 2));   // مكتب الاستقبال
-        for (const sgn of [-1, 1]) { const pz = L.entZ + sgn * 2.7; if (pz < sg.z0 + 0.5 || pz > sg.z1 - 0.5) continue;
-          add(mesh(new T.CylinderGeometry(0.3, 0.24, 0.5, 12), lam(P.wall))).position.set(bx1 - 1.1, 0.39, pz); add(mesh(new T.SphereGeometry(0.46, 12, 10), lam(P.tree[0]))).position.set(bx1 - 1.1, 1.0, pz); }
-      }
-      if (!last) wallAlongX(sg.z1 + WALL / 2, b0x - WALL, bx1, 1.1);
-    });
-    sweepLabels(['x:other:']);                                                                              // أسماء غرف حُذفت من المخطط
-    if (!L.rest) wallAlongX(bz1 + WALL / 2, bx0, bx1, 0.6);                                                // الجدار الجانبي القريب (مقطوع)
-    else {
-      // جناح الاستراحة: يفصله عن القاعات جدار فيه فتحة الممر، وجداره القريب مقطوع
-      const R = L.rest, rw = R.z1 - R.z0, rzc = (R.z0 + R.z1) / 2;
-      wallAlongX(bz1 + WALL / 2, bx0, cx0, 1.1); wallAlongX(bz1 + WALL / 2, cx1, bx1, 1.1);
-      wallAlongX(zE + WALL / 2, bx0, bx1, 0.6); wallAlongZ(xn, bz1, zE + WALL, 0.6);
-      restFloor = add(box(R.x1 - R.x0, 0.14, rw, P.rest, (R.x0 + R.x1) / 2, 0.07, rzc, false)); restFloor.userData.pick = { type: 'restroom' };
-      add(box(CORR - 0.5, 0.014, rw - 0.5, P.corr, cxc, 0.147, rzc, false));                                // ممشى الجناح
-      add(box(CORR - 1.7, 0.016, Math.max(1, rw - 2.2), P.trim, cxc, 0.156, rzc, false));                   // سجادته
-      add(mesh(new T.CylinderGeometry(0.55, 0.55, 0.08, 20), lam(P.wood))).position.set(cxc, 0.62, rzc);    // طاولة صغيرة
-      add(mesh(new T.CylinderGeometry(0.09, 0.14, 0.44, 10), lam(P.wood))).position.set(cxc, 0.38, rzc);
-      add(mesh(new T.SphereGeometry(0.17, 12, 10), lam(P.hl))).position.set(cxc, 0.82, rzc);                // مصباح
-      buildChairs(add);
     }
-    // المدخل من الخارج: درج، بوابة، لوحة الاسم
+    // جدران الممرات الطولية (فيها أبواب القاعات والمكاتب)
+    const gapsAt = bw => L.slots.filter(g => g.bwx === bw).map(g => g.doorGap);
+    const mid = 1.5 * RW, offGaps = [[mid - 1.6, mid - 0.3], [mid + 0.3, mid + 1.6]];
+    wall(RD, 0, RD, yH0, 1.25, gapsAt(RD));
+    wall(RD + CORR, 0, RD + CORR, yH0, 1.25, gapsAt(RD + CORR).concat(offGaps));
+    wall(2 * RD + CORR, 0, 2 * RD + CORR, yH0, 1.25, gapsAt(2 * RD + CORR).concat(offGaps));
+    wall(2 * RD + 2 * CORR, 0, 2 * RD + 2 * CORR, yH0, 1.25, gapsAt(2 * RD + 2 * CORR));
+    // الفواصل بين القاعات، وجدار القاعات القريبة على الممر العرضي
+    for (const [a, b] of [[0, RD], [2 * RD + 2 * CORR, Xtot]]) for (const py of [RW, 2 * RW]) wall(a, py, b, py, 1.1);
+    wall(RD + CORR, RW, 2 * RD + CORR, RW, 1.1); wall(RD + CORR, 2 * RW, 2 * RD + CORR, 2 * RW, 1.1);
+    for (const [a, b] of [[0, RD], [RD + CORR, 2 * RD + CORR], [2 * RD + 2 * CORR, Xtot]]) wall(a, yH0, b, yH0, 1.1);
+    // المكاتب الأربعة: اثنان على كل ممر، وبابا كل اثنين متجاوران
+    const mx = RD + CORR + RD / 2;
+    wall(mx, RW, mx, 2 * RW, 1.1); wall(RD + CORR, mid, 2 * RD + CORR, mid, 1.1);
+    let oi = 0;
+    for (const [xa, xb, inPx, bw] of [[RD + CORR, mx, 1, RD + CORR], [mx, 2 * RD + CORR, -1, 2 * RD + CORR]]) for (const [ya, yb] of [[RW, mid], [mid, 2 * RW]]) {
+      slab(xa, xb, ya, yb, P.floorIdle);
+      const up = yb === mid; shut(bw, up ? mid - 1.6 : mid + 0.3, bw, up ? mid - 0.3 : mid + 1.6, 1.15);   // باب مغلق
+      const cx = (xa + xb) / 2, cy = (ya + yb) / 2, p = W(cx, cy);
+      add(rbox(0.85, 0.75, 1.9, 0.08, P.wood, p.x, 0.52, p.z));
+      label('x:office' + (oi++), cx, cy, 'مكتب');
+    }
+    // الصف القريب من المدخل: معمل، معمل | ممر المدخل | مقر اللجنة، معمل — أبوابها على الممر العرضي في الطرف القريب من المدخل
+    const south = [[0, RD, 'east'], [RD, e0, 'east'], [e1, Xtot - RD, 'west'], [Xtot - RD, Xtot, 'west']];
+    const hallGaps = south.map(([a, b, side]) => side === 'east' ? [b - 1.75, b - 0.35] : [a + 0.35, a + 1.75]).concat([[e0, e1]]);
+    wall(0, yH1, Xtot, yH1, 1.1, hallGaps);
+    for (const px of [RD, e0, e1, Xtot - RD]) wall(px, yH1, px, Ytot, 1.1);
+    south.forEach(([a, b, side], i) => {
+      if (i === 2) door(side === 'east' ? b - 0.35 : a + 0.35, yH1, side === 'east' ? -1 : 1, 0, 0, 1, 1.1);   // مقر اللجنة مفتوح
+      else { const g = hallGaps[i]; shut(g[0], yH1, g[1], yH1, 1.05); }                                         // المعامل مغلقة
+      if (i === 2) {
+        restFloor = slab(a, b, yH1, Ytot, P.rest); restFloor.userData.pick = { type: 'restroom' };
+      } else {
+        slab(a, b, yH1, Ytot, P.floorIdle);
+        const p = W((a + b) / 2, (yH1 + Ytot) / 2); add(rbox(Math.min(5, L.SD - 3), 0.75, 1.4, 0.08, P.wood, p.x, 0.52, p.z));
+        label('x:lab' + i, (a + b) / 2, yH1 + 1.6, 'معمل');
+      }
+    });
+    buildChairs(add);
+    // ممر المدخل: باب زجاجي وسجادة، ومن الخارج درج وبوابة ولوحة الاسم
+    { const p = W(Xtot / 2, Ytot); for (const sgn of [-1, 1]) add(box(0.06, 1.5, 1.15, P.glass, p.x, 0.89, p.z + sgn * 1.3, false));
+      add(box(1.7, 0.03, 3.2, P.trim, p.x - 1.5, 0.155, p.z, false)); }
+    const bx1 = L.bx1;
     add(box(1.3, 0.16, 6.2, P.plaza, bx1 + 0.65, -0.04, L.entZ, false)); add(box(1.3, 0.08, 7.2, P.plaza, bx1 + 1.9, -0.14, L.entZ, false));
     for (const sgn of [-1, 1]) add(box(0.42, 3.7, 0.42, P.wall, bx1 + 0.75, 1.75, L.entZ + sgn * 2.7));
     add(box(0.6, 0.5, 6.3, P.cut, bx1 + 0.75, 3.85, L.entZ));
     setLabel('x:sign', { x: bx1 + 0.75, y: 4.3, z: L.entZ, text: 'كلية السليل التقنية', cls: 'sign', maxUpp: 0.2 });
+    if (L.unplaced.length) { const p = W(Xtot / 2, yH0 + HALL / 2); setLabel('x:unplaced', { x: p.x, y: 1.6, z: p.z, text: 'قاعات بلا مكان في المبنى', sub: L.unplaced.join('، '), subDir: 'rtl', cls: 'room off', maxUpp: 0.2 }); }
+    else dropLabel('x:unplaced');
+    sweepLabels(['x:r', 'x:office', 'x:lab']);
   }
   /** كراسي الاستراحة: قاعدة + ظهر + مسندان لكل كرسي (ثابتة)، وساقا الجالس تظهران على الكرسي المشغول (في syncLegs) */
   function buildChairs(add) {
@@ -11914,8 +11800,8 @@ const Scene3D = (() => {
     deskMesh = new T.InstancedMesh(new T.RoundedBoxGeometry(0.5, 0.62, 1.05, 2, 0.08), new T.MeshLambertMaterial({ color: 0xffffff }), Math.max(1, seatIndex.length));
     deskMesh.castShadow = true; deskMesh.receiveShadow = true; deskMesh.count = seatIndex.length; deskMesh.frustumCulled = false;
     seatIndex.forEach((si, i) => {
-      const p = seatPos(L.roomById.get(si.roomId), si.c, si.s);
-      tmpM.makeTranslation(p.x, 0.45, p.z); deskMesh.setMatrixAt(i, tmpM); deskMesh.setColorAt(i, tmpC.set(P.desk));
+      const room = L.roomById.get(si.roomId), p = seatPos(room, si.c, si.s);
+      tmpM.makeRotationY(Math.abs(room.d.z) > 0.5 ? Math.PI / 2 : 0).setPosition(p.x, 0.45, p.z); deskMesh.setMatrixAt(i, tmpM); deskMesh.setColorAt(i, tmpC.set(P.desk));
     });
     deskMesh.instanceMatrix.needsUpdate = true; if (deskMesh.instanceColor) deskMesh.instanceColor.needsUpdate = true;
     gSeats.add(deskMesh);
@@ -12094,9 +11980,9 @@ const Scene3D = (() => {
       const state = (off ? 'off' : used ? 'on' : 'idle') + (mine ? '+hl' : '');
       o.used = used; o.cap = r.cols * r.seats; o.on = !off && used > 0;
       if (o.state !== state) { o.state = state; o.floorMat.color.set(mine ? P.tileSel : o.on ? P.floor : off ? P.floorOff : P.floorIdle); }
-      // ملصق قاعات الصف الأمامي على واجهتها، مُزاحًا بعيدًا عن بهو المدخل حتى لا يغطي لوحة اسم الكلية
-      const lz = r.row === 'A' ? r.z0 + (r.cols * PZ + MZ * 2) / 2 : (r.z1 <= L.lobby.z0 ? r.z0 + 2.4 : r.z1 - 2.4);
-      setLabel('r:' + rid, { x: r.row === 'A' ? r.x0 + 0.15 : r.x0 + r.rowDepth + 0.2, y: r.row === 'A' ? 2.8 : 0.95, z: lz, text: 'قاعة ' + r.num,
+      // ملصق القاعة في مؤخرتها (بعيدًا عن السبورة)
+      const lp = loc(r, r.depth - 1.3, r.width / 2);
+      setLabel('r:' + rid, { x: lp.x, y: 1.0, z: lp.z, text: 'قاعة ' + r.num,
         sub: off ? 'معطّلة' : mine ? mine + ' متدرب' : (dist ? used + ' / ' + o.cap : String(o.cap)), subDir: off || mine ? 'rtl' : 'ltr',
         cls: 'room ' + (off ? 'off' : mine ? 'hl' : (hlActive || !used) ? 'idle' : ''), maxUpp: 0.14 });
     }
@@ -12113,7 +11999,7 @@ const Scene3D = (() => {
         if (!k || c >= room.cols || s >= room.seats) return;
         const p = seatPos(room, c, s); let id = k; while (want.has(id)) id += '#';
         const mine = hl ? courseOfReg(k) === hl : null;
-        want.set(id, { k, roomId: r.roomId, ri, c, s, x: p.x + 0.52, z: p.z, hl: mine, color: hlActive && !mine ? P.dim : (colors.get(courseOfReg(k)) || P.idle), order: n++ });
+        want.set(id, { k, roomId: r.roomId, ri, c, s, x: p.x + room.d.x * 0.52, z: p.z + room.d.z * 0.52, hl: mine, color: hlActive && !mine ? P.dim : (colors.get(courseOfReg(k)) || P.idle), order: n++ });
       }));
     });
     const byId = new Map(figs.filter(f => !f.dying).map(f => [f.id, f]));
@@ -12135,9 +12021,13 @@ const Scene3D = (() => {
 
   /* ---------- المراقبون: مجسّم واحد لكل مراقب — واقف في قاعته أو جالس على كرسيه في الاستراحة ---------- */
   const SIT_Y = -0.385, SIT_DZ = -0.1;   // وضع الجلوس: الجسم ينزل داخل قاعدة الكرسي فيظهر جذعه فوق المقعد، ويرجع قليلًا نحو ظهر الكرسي
-  function supSpan(room) { const a = room.z0 + 1.0, b = room.z0 + room.cols * PZ + MZ * 2 - 1.0; return { mid: (a + b) / 2, amp: Math.max(0, (b - a) / 2) }; }
+  /** محور مشي المراقب أمام قاعته: على امتداد الأعمدة (w) — axis = 'x' أو 'z' */
+  function supSpan(room) {
+    const axis = Math.abs(room.w.x) > 0.5 ? 'x' : 'z', a = room.O[axis] + room.w[axis] * 1.0, b = room.O[axis] + room.w[axis] * (room.width - 1.0);
+    return { axis, other: axis === 'x' ? 'z' : 'x', mid: (a + b) / 2, amp: Math.max(0, Math.abs(b - a) / 2) };
+  }
   /** الموضع الثابت للمراقب في مقدمة قاعته (الأول ثم الثاني) */
-  function supSpot(room, pos) { const g = supSpan(room); return { x: room.x0 + 1.15 + pos * 1.05, z: g.mid + (pos ? 0.9 : -0.9) * Math.min(1, g.amp) }; }
+  function supSpot(room, pos) { const g = supSpan(room), q = loc(room, 1.15 + pos * 1.05, 0), p = {}; p[g.other] = q[g.other]; p[g.axis] = g.mid + (pos ? 0.9 : -0.9) * Math.min(1, g.amp); return p; }
   function makeSup(k) {
     const g = new T.Group(), bodyMat = ownMat(P.idle);
     const body = mesh(new T.CapsuleGeometry(0.3, 0.95, 4, 12), bodyMat); body.userData.ownMat = true; body.position.y = 0.92;
@@ -12180,9 +12070,10 @@ const Scene3D = (() => {
         ch.resting = resting;
       }
       const R = L.rest, rzc = (R.z0 + R.z1) / 2;
-      setLabel('r:rest', { x: R.x0 + 0.15, y: 2.8, z: rzc, text: 'استراحة المراقبين', sub: idle ? idle + ' بلا مراقبة' : 'الكل مكلف', subDir: 'rtl', cls: 'room rest', maxUpp: 0.14 });
-      if (R.nA) setLabel('r:restA', { x: L.ax0 + L.dA / 2, y: 0.5, z: R.z1 + 0.25, text: 'مجموعة أ', cls: 'sup A grp', maxUpp: 0.085, below: true });
-      if (R.nB) setLabel('r:restB', { x: L.b0x + L.dB / 2, y: 0.5, z: R.z1 + 0.25, text: 'مجموعة ب', cls: 'sup B grp', maxUpp: 0.085, below: true });
+      setLabel('r:rest', { x: (R.x0 + R.x1) / 2, y: 2.4, z: R.z0 + 1.0, text: 'مقر اللجنة', sub: idle ? idle + ' بلا مراقبة' : 'الكل مكلف', subDir: 'rtl', cls: 'room rest', maxUpp: 0.14 });
+      const fA = R.chairs.find(c => c.group === 'A'), fB = R.chairs.find(c => c.group !== 'A');
+      if (R.nA && fA) setLabel('r:restA', { x: fA.x, y: 0.5, z: fA.z + 0.9, text: 'مجموعة أ', cls: 'sup A grp', maxUpp: 0.085, below: true });
+      if (R.nB && fB) setLabel('r:restB', { x: fB.x, y: 0.5, z: fB.z + 0.9, text: 'مجموعة ب', cls: 'sup B grp', maxUpp: 0.085, below: true });
     }
     for (const [k, w] of want) {
       let e = supEnts.get(k); const isNew = !e;
@@ -12197,8 +12088,9 @@ const Scene3D = (() => {
       e.fresh = true; e.hold = selected || !!supDrag;                         // المحدَّد يقف ليسهل سحبه، وأثناء أي سحب يقف الجميع لتثبت الأهداف
       if (!(supDrag && supDrag.e === e)) {
         const p = w.duty ? w.p : w.chair;
-        e.goal.x = p.x; e.goal.y = 0; e.goal.sit = w.duty ? 0 : 1; e.goal.s = 1;
-        if (moved || e.hold || !w.duty || !Stage.motion || reduceMotion) { e.goal.z = p.z; e.walk = true; }
+        const ax = w.duty ? supSpan(w.room) : { axis: 'z', other: 'x' };
+        e.goal[ax.other] = p[ax.other]; e.goal.y = 0; e.goal.sit = w.duty ? 0 : 1; e.goal.s = 1;
+        if (moved || e.hold || !w.duty || !Stage.motion || reduceMotion) { e.goal[ax.axis] = p[ax.axis]; e.walk = true; }
         else if (wasHold) e.walk = true;                      // عاد للمشي: تُضبط بدايته من مكانه الحالي
       }
       if (isNew || snap) { e.cur.x = e.goal.x; e.cur.z = e.goal.z; e.cur.y = e.goal.y; e.cur.sit = e.goal.sit; e.fresh = true; }
@@ -12215,10 +12107,10 @@ const Scene3D = (() => {
   /** مشي المراقب أمام قاعته (حركة محيطة). البداية تُضبط بحيث يكمل من مكانه الحالي بلا قفزة. */
   function paceSup(e, t) {
     const g = supSpan(e.room);
-    e.cur.z = e.goal.z = g.mid + Math.sin(t * e.speed + e.phase) * g.amp; applySup(e);
+    e.cur[g.axis] = e.goal[g.axis] = g.mid + Math.sin(t * e.speed + e.phase) * g.amp; applySup(e);
   }
   function startPace(e, t) {
-    const g = supSpan(e.room), r = g.amp > 0 ? Math.max(-1, Math.min(1, (e.cur.z - g.mid) / g.amp)) : 0;
+    const g = supSpan(e.room), r = g.amp > 0 ? Math.max(-1, Math.min(1, (e.cur[g.axis] - g.mid) / g.amp)) : 0;
     e.phase = Math.asin(r) - t * e.speed;
   }
   /** الهدف تحت المراقب المسحوب: أقرب موضع مراقب في قاعة، أو أقرب كرسي عليه جالس */
@@ -12228,7 +12120,7 @@ const Scene3D = (() => {
       if (self.duty && self.roomId === sp.roomId && self.pos === sp.pos) continue;
       const d = Math.hypot(x - sp.x, z - sp.z); if (d < bd) { bd = d; best = { rid: sp.roomId, pos: sp.pos, x: sp.x, z: sp.z }; }
     }
-    if (L.rest && z > L.rest.z0 - 0.4) for (const e of supEnts.values()) {
+    if (L.rest && x > L.rest.x0 - 0.6 && x < L.rest.x1 + 0.6 && z > L.rest.z0 - 0.6 && z < L.rest.z1 + 0.6) for (const e of supEnts.values()) {
       if (e.duty || e === self || !e.chair) continue;
       const d = Math.hypot(x - e.chair.x, z - e.chair.z); if (d < Math.min(bd, 1.0)) { bd = d; best = { supId: e.supId, x: e.chair.x, z: e.chair.z, chair: true }; }
     }
@@ -12244,10 +12136,10 @@ const Scene3D = (() => {
       selBox.visible = true; selBox.userData.follow = () => { selBox.scale.set(b.w + 0.5, b.h * b.cur.s + 0.4, b.w + 0.5); selBox.position.set(b.cur.x, TILE_Y + b.cur.y + b.h * b.cur.s / 2, b.cur.z); };
     } else if (s.type === 'room') {
       const o = roomObjs.get(s.roomId); if (!o) return; const r = o.room;
-      selBox.visible = true; selBox.userData.follow = () => { selBox.scale.set(r.rowDepth + 0.5, 2.6, r.z1 - r.z0 + 0.5); selBox.position.set(r.x0 + r.rowDepth / 2, 1.3, (r.z0 + r.z1) / 2); };
+      selBox.visible = true; selBox.userData.follow = () => { selBox.scale.set(r.x1 - r.x0 + 0.5, 2.6, r.z1 - r.z0 + 0.5); selBox.position.set((r.x0 + r.x1) / 2, 1.3, (r.z0 + r.z1) / 2); };
     } else if (s.type === 'seat') {
       const room = L.roomById.get(s.roomId); if (!room) return; const p = seatPos(room, s.c, s.s);
-      selRing.visible = true; selRing.scale.setScalar(1.25); selRing.position.set(p.x + 0.3, 0.17, p.z);
+      selRing.visible = true; selRing.scale.setScalar(1.25); selRing.position.set(p.x + room.d.x * 0.3, 0.17, p.z + room.d.z * 0.3);
     } else if (s.type === 'sup') {
       const e = dutyAt.get(s.roomId + ':' + s.pos), sp = spots.get(s.roomId + ':' + s.pos); if (!e && !sp) return;
       selRing.visible = true; selRing.scale.setScalar(1.2); selRing.userData.follow = () => selRing.position.set(e ? e.cur.x : sp.x, 0.17, e ? e.cur.z : sp.z);
@@ -12305,7 +12197,7 @@ const Scene3D = (() => {
     if (!L) return { x0: -20, x1: 40, z0: -10, z1: 80, h: 4 };
     const pad = (D.sched.unscheduled || []).length ? PITCH + 2 : 0;
     const board = { x0: -5, x1: L.boardW + 3, z0: -6, z1: L.boardL + 2 + pad, h: 6 };
-    const halls = { x0: L.bx0 - 0.5, x1: L.bx1 + 2.6, z0: L.bz0 - 1, z1: L.bzE + 1, h: 4.6 };
+    const halls = { x0: L.bx0 - 0.5, x1: L.bx1 + 2.6, z0: L.bz0 - 0.8, z1: L.bzE + 0.8, h: 4.6 };
     if (zone === 'board') return board;
     if (zone === 'rooms') return halls;
     return { x0: Math.min(board.x0, halls.x0), x1: Math.max(board.x1, halls.x1), z0: Math.min(board.z0, halls.z0), z1: Math.max(board.z1, halls.z1), h: 7 };
@@ -12316,9 +12208,9 @@ const Scene3D = (() => {
     if (typeof what === 'string') { cam.userMoved = false; fit(zoneBox(what), immediate); return; }
     if (what.slot) { const t = tiles.get(what.slot); if (!t) return; fit({ x0: t.x - TILE / 2 - 1, x1: t.x + TILE / 2 + 3, z0: t.z - TILE / 2 - 1, z1: t.z + TILE / 2 + 1, h: 7 }, immediate, 1.45); }
     else if (what.course) { const b = blocks.get(what.course); if (!b) return; cam.gx = b.goal.x; cam.gz = b.goal.z; cam.gspan = Math.min(cam.gspan, 0.05 * H); needsRender = true; }
-    else if (what.room) { const r = L.roomById.get(what.room); if (!r) return; fit({ x0: r.x0 - 0.5, x1: r.x0 + r.rowDepth + 0.8, z0: r.z0 - 0.6, z1: r.z1 + 0.6, h: 3.2 }, immediate, 1.25); }
+    else if (what.room) { const r = L.roomById.get(what.room); if (!r) return; fit({ x0: r.x0 - 0.5, x1: r.x1 + 0.8, z0: r.z0 - 0.6, z1: r.z1 + 0.6, h: 3.2 }, immediate, 1.25); }
     else if (what.rooms) { const rs = what.rooms.map(id => L.roomById.get(id)).filter(Boolean); if (!rs.length) return;
-      fit({ x0: Math.min(...rs.map(r => r.x0)) - 0.6, x1: Math.max(...rs.map(r => r.x0 + r.rowDepth)) + 0.9, z0: Math.min(...rs.map(r => r.z0)) - 0.7, z1: Math.max(...rs.map(r => r.z1)) + 0.7, h: 3.4 }, immediate, 1.18); }
+      fit({ x0: Math.min(...rs.map(r => r.x0)) - 0.6, x1: Math.max(...rs.map(r => r.x1)) + 0.9, z0: Math.min(...rs.map(r => r.z0)) - 0.7, z1: Math.max(...rs.map(r => r.z1)) + 0.7, h: 3.4 }, immediate, 1.18); }
     else if (what.rest) { const R = L.rest; if (!R) return; fit({ x0: R.x0 - 0.6, x1: R.x1 + 0.9, z0: R.z0 - 0.8, z1: R.z1 + 0.9, h: 3 }, immediate, 1.12); }
     else if (what.chair) { const b = L.rest && L.rest.chairOf.get(what.chair); if (!b) return; cam.gx = b.x; cam.gz = b.z; cam.gspan = Math.min(cam.gspan, 0.027 * H); needsRender = true; }
     else if (what.seat) { const r = L.roomById.get(what.seat.roomId); if (!r) return; const p = seatPos(r, what.seat.c, what.seat.s); cam.gx = p.x; cam.gz = p.z; cam.gspan = Math.min(cam.gspan, 0.03 * H); needsRender = true; }
@@ -12424,7 +12316,7 @@ const Scene3D = (() => {
   function hoverPos(hit) {
     if (hit.type === 'course') { const b = blocks.get(hit.code); return b ? { x: b.cur.x, y: TILE_Y + b.h + (b.pin ? 2.3 : 0.6), z: b.cur.z } : null; }
     if (hit.type === 'slot') { const t = tiles.get(hit.key); return t ? { x: t.x, y: 1.2, z: t.z } : null; }
-    if (hit.type === 'seat') { const r = L.roomById.get(hit.roomId); if (!r) return null; const p = seatPos(r, hit.c, hit.s); return { x: p.x + 0.4, y: 1.75, z: p.z }; }
+    if (hit.type === 'seat') { const r = L.roomById.get(hit.roomId); if (!r) return null; const p = seatPos(r, hit.c, hit.s); return { x: p.x + r.d.x * 0.4, y: 1.75, z: p.z + r.d.z * 0.4 }; }
     if (hit.type === 'sup') { const e = dutyAt.get(hit.roomId + ':' + hit.pos), sp = spots.get(hit.roomId + ':' + hit.pos); return e ? { x: e.cur.x, y: 2.5, z: e.cur.z } : sp ? { x: sp.x, y: 1.2, z: sp.z } : null; }
     if (hit.type === 'rest') { const b = L.rest && L.rest.chairOf.get(hit.supId); return b ? { x: b.x, y: 2.15, z: b.z } : null; }
     return null;
@@ -12613,7 +12505,7 @@ const Scene3D = (() => {
   function setActive(on) { st.active = !!on; if (on) { lastT = performance.now(); needsRender = true; } }
   function rerender() { needsRender = true; }
 
-  return { init, sync, focus, zoom, rotate, setInsets, setPalette, setActive, rerender, hooks, st, cam, buildingRows,
+  return { init, sync, focus, zoom, rotate, setInsets, setPalette, setActive, rerender, hooks, st, cam,
     ok: () => st.ok, isUserView: () => !!cam.userMoved, PALETTES,
     /** للاختبار الآلي: يُنهي كل الحركات فورًا */
     _settle: () => { for (let i = 0; i < 400; i++) { stepCamera(0.05); stepEntities(0.05); } applyCamera(); syncLegs(); renderer.render(scene, camera); updateLabels(); needsRender = true; },
@@ -12632,7 +12524,7 @@ const Scene3D = (() => {
      − المستثنون من القاعات فقط = لهم مقاعد (c.roomsCount) ← ثم عدد الجالسين فعلًا في التوزيع المحفوظ لفترة المقرر.
      تحتها أسماء من ليس له مقعد مجموعةً حسب قيمة الحالة التي استثنتهم (courseAccounting في الوحدة 29).
 
-   المراقبون في المشهد: سحب مراقب محدَّد إلى مراقب آخر = تبديل (swapSupervisorsManually)، ومن/إلى كرسي في الاستراحة = إحلال
+   المراقبون في المشهد: سحب مراقب محدَّد إلى مراقب آخر = تبديل (swapSupervisorsManually)، ومن/إلى كرسي في مقر اللجنة = إحلال
    (setSupervisorManually). وللغرض نفسه بدون سحب: قائمتا «بدّله مع» و«ضعه في موضع» في بطاقة التفاصيل. */
 
 const Hud = (() => {
@@ -12828,11 +12720,11 @@ const Hud = (() => {
         rv && rv.exists ? row('في مقاعد / المطلوب', ltr(`${rv.seated} / ${rv.required}`), rv.seated === rv.required ? '' : 'bad') : null,
         rv && rv.exists ? row('القاعات المستخدمة', rv.rooms) : null,
         rv && rv.exists ? row('مقاعد فارغة', rv.empty) : null,
-        Stage.mode === 'rooms' && S.supervisors.some(supEligible) ? row('مراقبون بلا مراقبة (في الاستراحة)', supervisorsOffDuty(key).length) : null),
+        Stage.mode === 'rooms' && S.supervisors.some(supEligible) ? row('مراقبون بلا مراقبة (في مقر اللجنة)', supervisorsOffDuty(key).length) : null),
       blockers.length ? h('div', { class: 'alert warn small' }, h('b', null, 'قبل بناء الجدول: '), h('ul', null, ...blockers.map(b => h('li', null, b)))) : null,
       rv && rv.reasons.length ? h('div', { class: 'alert bad small' }, rv.reasons.join(' — ')) : null,
       h('div', { class: 'd-actions' }, ...acts),
-      h('p', { class: 'd-hint' }, Stage.mode === 'board' ? 'اضغط بلاطة لاختيار فترتها، واضغطها مرتين لدخول قاعاتها. لنقل مقرر: اضغط مكعبه لتحديده ثم اسحبه إلى بلاطة أخرى.' : 'اضغط قاعة أو متدربًا أو مراقبًا لعرض تفاصيله. لنقل متدرب: اضغطه لتحديده ثم اسحبه إلى مقعد آخر. لتبديل مراقب: اضغطه ثم اسحبه إلى مراقب آخر، أو اسحب جالسًا من الاستراحة إلى مراقب حالي ليحل محله.')];
+      h('p', { class: 'd-hint' }, Stage.mode === 'board' ? 'اضغط بلاطة لاختيار فترتها، واضغطها مرتين لدخول قاعاتها. لنقل مقرر: اضغط مكعبه لتحديده ثم اسحبه إلى بلاطة أخرى.' : 'اضغط قاعة أو متدربًا أو مراقبًا لعرض تفاصيله. لنقل متدرب: اضغطه لتحديده ثم اسحبه إلى مقعد آخر. لتبديل مراقب: اضغطه ثم اسحبه إلى مراقب آخر، أو اسحب جالسًا من مقر اللجنة إلى مراقب حالي ليحل محله.')];
   }
   /** مجموعة متدربين تُفتح بالضغط: السبب (قيمة الحالة) ثم الأسماء. بيانات الملفات تُكتب نصًا فقط. */
   function whoGroups(list) {
@@ -12965,7 +12857,7 @@ const Hud = (() => {
         out.push({ rid, pos, sup, label: `قاعة ${supRoomNum(rid)} — ${pos ? 'الثاني' : 'الأول'}: ${sup ? sup.name + ' (' + (GROUP_LABEL[sup.group] || 'غير مصنف') + ')' : 'فارغ'}` }); }); }
     return out;
   }
-  /** ينفّذ تعديل مراقبين بين طرفين (موضع { rid, pos } أو جالس في الاستراحة { supId }) بالدوال الأصلية، ويعرض نتيجته */
+  /** ينفّذ تعديل مراقبين بين طرفين (موضع { rid, pos } أو جالس في مقر اللجنة { supId }) بالدوال الأصلية، ويعرض نتيجته */
   async function commitSupChange(key, a, b) {
     const plan = supervisorChangePlan(key, a, b);
     if (plan.error) { toast(plan.error, 'bad'); App.render(); return; }
@@ -13005,39 +12897,39 @@ const Hud = (() => {
       !pair ? h('div', { class: 'd-text small muted' }, 'لم يُوزَّع المراقبون على هذه الفترة بعد — استخدم «توزيع المراقبين».') : [
         others.length ? pickList(sup ? 'بدّله مع مراقب قاعة أخرى' : 'انقل إليه مراقبًا من قاعة أخرى', '— اختر —', others,
           o => commitSupChange(key, { rid: s.roomId, pos: s.pos }, { rid: o.rid, pos: o.pos }), 'sup-swap') : null,
-        resting.length ? pickList(sup ? 'أو ضع مكانه مراقبًا من الاستراحة' : 'ضع فيه مراقبًا من الاستراحة', '— اختر —',
+        resting.length ? pickList(sup ? 'أو ضع مكانه مراقبًا من مقر اللجنة' : 'ضع فيه مراقبًا من مقر اللجنة', '— اختر —',
           resting.map(x => ({ supId: x.sup.id, disabled: !x.available, label: `${x.sup.name} (${GROUP_LABEL[x.sup.group]}) · ${counts.total.get(x.sup.id) || 0}` + (x.available ? '' : ' — غير متاح') })),
           o => commitSupChange(key, { rid: s.roomId, pos: s.pos }, { supId: o.supId }), 'sup-from-rest') : null,
         h('label', { class: 'd-field' }, h('span', null, 'كل المراقبين (القائمة الأصلية)'), supervisorSelect(key, s.roomId, s.pos, pair[s.pos], counts, elig))],
-      h('p', { class: 'd-hint' }, sup ? 'المراقب محدَّد الآن وواقف في مكانه — اسحبه إلى مراقب في قاعة أخرى للتبديل بينهما، أو إلى مراقب جالس في الاستراحة ليحل الجالس محله. الحلقة الصفراء تحت الهدف = سيصير مراقبا القاعة من نفس التصنيف (يظهر تنبيه قبل التنفيذ)، والحمراء = مرفوض.'
-        : 'اسحب إلى هذه الحلقة مراقبًا من قاعة أخرى أو من الاستراحة لملء الموضع.'),
+      h('p', { class: 'd-hint' }, sup ? 'المراقب محدَّد الآن وواقف في مكانه — اسحبه إلى مراقب في قاعة أخرى للتبديل بينهما، أو إلى مراقب جالس في مقر اللجنة ليحل الجالس محله. الحلقة الصفراء تحت الهدف = سيصير مراقبا القاعة من نفس التصنيف (يظهر تنبيه قبل التنفيذ)، والحمراء = مرفوض.'
+        : 'اسحب إلى هذه الحلقة مراقبًا من قاعة أخرى أو من مقر اللجنة لملء الموضع.'),
       h('p', { class: 'd-hint' }, 'الرقم بجانب كل اسم هو عدد تكليفاته. التعديل اليدوي محمي من الموازنة التلقائية.')];
   }
-  /** مراقب بلا مراقبة في الفترة المختارة (جالس في الاستراحة) */
+  /** مراقب بلا مراقبة في الفترة المختارة (جالس في مقر اللجنة) */
   function detailRest(s) {
     const sup = supById(s.supId), key = Stage.slot, avail = key ? supAvailable(sup, key) : true, pos = key ? dutyPositions(key) : [];
-    return [dHead('استراحة المراقبين', sup.name, key ? 'بلا مراقبة في: ' + slotLabel(key) : null, 'users', true),
+    return [dHead('مقر اللجنة', sup.name, key ? 'بلا مراقبة في: ' + slotLabel(key) : null, 'users', true),
       h('div', { class: 'chips' }, groupTag(sup.group), !key ? null : avail ? chip('متاح لهذه الفترة', 'ok') : chip('غير متاح في هذه الفترة', 'bad')),
       h('div', { class: 'd-rows' }, ...supStats(sup, key)),
       !avail ? h('div', { class: 'alert warn small' }, 'توفره أو فتراته المسموحة (في تبويب المراقبين) لا تسمح بتكليفه في هذه الفترة، فلن يُقبل وضعه في قاعة.') : null,
       avail && pos.length ? pickList('ضعه في موضع', '— اختر القاعة والموضع —', pos, o => commitSupChange(key, { supId: sup.id }, { rid: o.rid, pos: o.pos }), 'rest-place')
         : avail ? h('div', { class: 'd-text small muted' }, key ? 'لا توجد مواضع مراقبة في هذه الفترة بعد (وزّع القاعات ثم المراقبين).' : 'حدّد أيام الاختبار وابنِ الجدول أولًا، ثم وزّع القاعات والمراقبين.') : null,
-      h('div', { class: 'd-actions' }, btn('عرض الاستراحة كلها', '', () => { Stage.sel = { type: 'restroom' }; App.render(); Scene3D.focus({ rest: true }); })),
+      h('div', { class: 'd-actions' }, btn('عرض مقر اللجنة كله', '', () => { Stage.sel = { type: 'restroom' }; App.render(); Scene3D.focus({ rest: true }); })),
       h('p', { class: 'd-hint' }, 'المراقب محدَّد الآن — اسحبه من كرسيه إلى مراقب في أي قاعة ليحل محله (والآخر يذهب للاستراحة)، أو إلى حلقة موضع فارغ. إن صار مراقبا القاعة من نفس التصنيف يظهر تنبيه قبل التنفيذ.')];
   }
   function detailRestRoom() {
     const key = Stage.slot, off = supervisorsOffDuty(key), counts = supCounts();
     const others = S.supervisors.filter(x => !supEligible(x)), disabled = others.filter(x => !x.enabled).length, unclass = others.length - disabled;
-    const line = x => h('button', { type: 'button', class: 'd-li link', 'data-rest': x.sup.id, title: 'تحديده في الاستراحة',
+    const line = x => h('button', { type: 'button', class: 'd-li link', 'data-rest': x.sup.id, title: 'تحديده في مقر اللجنة',
       onclick: () => { Stage.sel = { type: 'rest', supId: x.sup.id }; App.render(); Scene3D.focus({ chair: x.sup.id }); } },
       h('i', { class: 'dot', style: { background: x.sup.group === 'A' ? '#0f6b48' : '#2a4d8f' } }), h('span', { class: 'ell' }, x.sup.name),
       x.available ? null : chip('غير متاح', 'bad'), h('b', { class: 'num', title: 'عدد تكليفاته' }, counts.total.get(x.sup.id) || 0));
     const grp = g => { const l = off.filter(x => x.sup.group === g); return l.length ? [h('div', { class: 'd-sec' }, `مجموعة ${GROUP_LABEL[g]} (${l.length})`), ...l.map(line)] : []; };
-    return [dHead(key ? slotLabel(key) : 'الاستراحة', 'استراحة المراقبين', `${off.length} مراقب بلا مراقبة في هذه الفترة`, 'users', true),
+    return [dHead(key ? slotLabel(key) : 'مقر اللجنة', 'مقر اللجنة', `${off.length} مراقب بلا مراقبة في هذه الفترة`, 'users', true),
       h('p', { class: 'd-text small' }, 'لكل مراقب مصنف (أ أو ب) ومفعّل كرسي. من ليس له قاعة في الفترة المختارة يجلس على كرسيه، والكرسي الفارغ صاحبه مكلف الآن. الجالس الرمادي غير متاح في هذه الفترة.'),
       off.length ? h('div', { class: 'd-list' }, ...grp('A'), ...grp('B')) : h('div', { class: 'd-text small muted' }, 'كل المراقبين مكلفون في هذه الفترة.'),
       unclass || disabled ? h('div', { class: 'alert warn small' }, [unclass ? `${unclass} غير مصنف` : null, disabled ? `${disabled} معطّل` : null].filter(Boolean).join(' · ') + ' — لا يظهرون هنا لأنهم لا يدخلون التوزيع. صنّفهم أو فعّلهم من تبويب المراقبين.') : null,
-      h('div', { class: 'd-actions' }, btn('تكبير الاستراحة', '', () => Scene3D.focus({ rest: true })), btn('فتح تبويب المراقبين', '', () => switchTab('supervisors'))),
+      h('div', { class: 'd-actions' }, btn('تكبير مقر اللجنة', '', () => Scene3D.focus({ rest: true })), btn('فتح تبويب المراقبين', '', () => switchTab('supervisors'))),
       h('p', { class: 'd-hint' }, 'الرقم بجانب الاسم عدد تكليفاته في كل الفترات. اضغط جالسًا لتحديده، ثم اسحبه إلى مراقب في قاعة ليحل محله.')];
   }
 
@@ -13124,7 +13016,7 @@ const Hud = (() => {
       const off = supervisorsOffDuty(key);
       if (S.supervisors.some(supEligible)) body.appendChild(h('button', { type: 'button', class: 'l-row' + (Stage.sel && (Stage.sel.type === 'restroom' || Stage.sel.type === 'rest') ? ' active' : ''), 'data-restroom': '1',
         onclick: () => { Stage.sel = { type: 'restroom' }; Stage.mode = 'rooms'; App.render(); Scene3D.focus({ rest: true }); } },
-        h('span', { class: 'l-ico' }, icon('users')), h('b', { class: 'l-id' }, 'الاستراحة'), h('span', { class: 'ell muted' }, 'مراقبون بلا مراقبة في هذه الفترة'),
+        h('span', { class: 'l-ico' }, icon('users')), h('b', { class: 'l-id' }, 'مقر اللجنة'), h('span', { class: 'ell muted' }, 'مراقبون بلا مراقبة في هذه الفترة'),
         h('span', { class: 'spacer' }), h('b', { class: 'num l-n' }, off.length), icon('left', 'chev')));
     }
     el.appendChild(body);
@@ -13188,7 +13080,7 @@ const Hud = (() => {
   }
   async function onDrop(drag, target) {
     if (!target) {
-      if (drag.type === 'sup' && drag.inRest && drag.src.rid !== undefined) toast('لإراحة مراقب: أفلته على مراقب جالس في الاستراحة، فيحل الجالس محله في القاعة.', '');
+      if (drag.type === 'sup' && drag.inRest && drag.src.rid !== undefined) toast('لإراحة مراقب: أفلته على مراقب جالس في مقر اللجنة، فيحل الجالس محله في القاعة.', '');
       return;
     }
     if (drag.type === 'sup') { await commitSupChange(Stage.slot, drag.src, supEnd(target)); return; }
