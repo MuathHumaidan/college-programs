@@ -57,7 +57,7 @@ const PROGRAMS=[
 ];
 document.getElementById('grid').innerHTML=PROGRAMS.map(p=>{
   const inner=`<span class="ico"><svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[p.icon]}</svg></span><h2>${p.name}</h2><p>${p.desc}</p>`;
-  return p.file?`<a class="card" href="${p.file}" target="_blank" rel="noopener">${inner}<span class="go">فتح البرنامج</span></a>`
+  return p.file?`<a class="card" href="${p.file}">${inner}<span class="go">فتح البرنامج</span></a>`
               :`<div class="card off">${inner}<span class="wait">بانتظار ملف البرنامج</span></div>`;
 }).join('');
 document.getElementById('clear').onclick=()=>{
