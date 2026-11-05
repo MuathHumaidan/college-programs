@@ -32,8 +32,12 @@
       if (saved && saved.json && !sessionHasData()) {
         const res = sessionToState(JSON.parse(saved.json));
         if (res.error) {
+          // نسخة قديمة لا تقبلها هذه النسخة من البرنامج: تبقى كما هي حتى يبدأ عمل جديد يحل محلها
           toast('تعذّرت استعادة العمل المحفوظ: ' + res.error, 'warn');
-          return;   // لا نكتب فوق نسخة لم نستطع قراءتها
+          stored = '';
+          ready = true;
+          setInterval(tick, 2000);
+          return;
         }
         S = res.state;
         verifyCandidate = null;
